@@ -61,6 +61,48 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, app: 'polaris-render-adapter' });
 });
 
+// ---- MCP CORS proxy (allowlisted upstreams) ----
+// Some MCP servers do not send CORS headers, so the browser build of Polaris
+// cannot call them directly. Relay those calls through this same-origin route.
+const MCP_PROXY_TARGETS: Record<string, string> = {
+  'zhangxinchuang': 'https://zhangxinchuang-mcp-3mdm.onrender.com/mcp',
+  'ombre-brain': 'https://ombre-brain-mw39.onrender.com/mcp',
+  'spicy-monopoly': 'https://spicy-monopoly-mcp.onrender.com/mcp'
+};
+const MCP_PROXY_SKIP_REQUEST_HEADERS = new Set(['host','content-length','connection','accept-encoding','origin','referer','sec-fetch-mode','sec-fetch-site','sec-fetch-dest']);
+const MCP_PROXY_SKIP_RESPONSE_HEADERS = new Set(['content-encoding','content-length','transfer-encoding','connection']);
+app.all('/api/mcp-proxy/:target', async (req: any, res: any) => {
+  const target = MCP_PROXY_TARGETS[String(req.params.target)];
+  if (!target) { res.status(404).json({ error: 'Unknown MCP proxy target' }); return; }
+  try {
+    const forwardHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (value === undefined) continue;
+      if (MCP_PROXY_SKIP_REQUEST_HEADERS.has(key.toLowerCase())) continue;
+      forwardHeaders[key] = Array.isArray(value) ? value.join(', ') : String(value);
+    }
+    const method = String(req.method || 'GET');
+    let body: any = undefined;
+    if (method !== 'GET' && method !== 'HEAD') {
+      if (typeof req.body === 'string') body = req.body;
+      else if (Buffer.isBuffer(req.body)) body = req.body.length ? req.body : undefined;
+      else if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) body = JSON.stringify(req.body);
+    }
+    const upstream = await fetch(target, { method, headers: forwardHeaders, body });
+    res.status(upstream.status);
+    upstream.headers.forEach((value, key) => {
+      if (MCP_PROXY_SKIP_RESPONSE_HEADERS.has(key.toLowerCase())) return;
+      res.setHeader(key, value);
+    });
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.send(buffer);
+  } catch (error) {
+    console.error('[mcp-proxy] upstream error:', error);
+    if (!res.headersSent) res.status(502).json({ error: { message: 'MCP proxy upstream failed', type: 'mcp_proxy_error' } });
+    else res.end();
+  }
+});
+// ---- end MCP proxy ----
 // static frontend
 app.use(express.static(distDir, { index: 'index.html', extensions: ['html'] }));
 
